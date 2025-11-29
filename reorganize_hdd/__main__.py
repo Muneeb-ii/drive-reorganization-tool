@@ -16,10 +16,10 @@ import time
 import json
 from pathlib import Path
 
-from .scanner import build_metadata, build_metadata_summary, scan_and_summarize
+from .scanner import build_metadata_summary, scan_and_summarize
 from .executor import apply_plan
 from .planning import validate_plan, call_llm_for_plan, call_llm_for_folder
-from .planning.rules import generate_moves_from_rules, call_llm_for_rules
+from .planning.rules import generate_moves_from_rules, call_llm_for_rules, validate_rule_coverage, generate_catch_all_rules
 from .utils import save_json, load_json, is_macos_bundle, load_metadata_files_stream, console, print_header, print_error, print_warning, print_success, print_plan_table
 from .llm import GEMINI_MODELS, DEFAULT_MODEL
 
@@ -181,7 +181,6 @@ def run_rules_mode(
     Run rule-based mode - LLM designs rules, Python applies them.
     Streams the plan to output_plan_path.
     """
-    from .utils import save_jsonl
     
     print_header("RULES MODE", "LLM Designs Organization Rules")
     
@@ -222,18 +221,49 @@ def run_rules_mode(
         save_json({"folders_to_create": [], "moves": []}, output_plan_path)
         return output_plan_path
     
-    # Apply rules locally
-    console.print("\n[bold cyan][STEP 3] Applying rules to generate moves...[/bold cyan]")
-    
-    # Determine source of files (memory or stream)
+    # Determine source of files (memory or stream) for validation
     files_source = metadata.get("files", [])
     if not files_source and metadata_path and metadata_path.exists():
         console.print(f"[dim]Streaming files from {metadata_path}...[/dim]")
         files_source = load_metadata_files_stream(metadata_path)
     elif not files_source:
         print_warning("No files found in metadata to apply rules to.")
+        save_json({"folders_to_create": [], "moves": []}, output_plan_path)
+        return output_plan_path
+    
+    # Validate rule coverage
+    console.print("\n[bold cyan][STEP 2.5] Validating rule coverage...[/bold cyan]")
+    # Convert generator to list for validation (we need to iterate twice)
+    files_list = list(files_source) if not isinstance(files_source, list) else files_source
+    coverage = validate_rule_coverage(files_list, rules)
+    
+    if coverage["coverage_pct"] < 100.0:
+        print_warning(f"Rule coverage: {coverage['coverage_pct']:.1f}% ({len(coverage['matched'])}/{coverage['total_files']} files matched)")
+        console.print(f"[yellow]Unmatched files: {len(coverage['unmatched'])}[/yellow]")
         
-    moves_gen = generate_moves_from_rules(files_source, rules)
+        # Auto-generate catch-all rules for unmatched files
+        console.print("[dim]Auto-generating catch-all rules for unmatched files...[/dim]")
+        catch_all_rules = generate_catch_all_rules(coverage["unmatched"])
+        
+        if catch_all_rules:
+            console.print(f"[green]Generated {len(catch_all_rules)} catch-all rule(s)[/green]")
+            rules.extend(catch_all_rules)
+            
+            # Re-validate with new rules
+            coverage = validate_rule_coverage(files_list, rules)
+            if coverage["coverage_pct"] >= 100.0:
+                print_success(f"Coverage now at 100% ({coverage['total_files']}/{coverage['total_files']} files matched)")
+            else:
+                print_warning(f"Coverage improved to {coverage['coverage_pct']:.1f}% but still not 100%")
+                console.print(f"[yellow]Still unmatched: {len(coverage['unmatched'])} files[/yellow]")
+    else:
+        print_success(f"Rule coverage: 100% ({coverage['total_files']}/{coverage['total_files']} files matched)")
+    
+    # Apply rules locally
+    console.print("\n[bold cyan][STEP 3] Applying rules to generate moves...[/bold cyan]")
+    
+    # Use the list we already have
+    moves_gen = generate_moves_from_rules(files_list, rules)
     
     # Stream to file
     print(f"[INFO] Streaming moves to {output_plan_path}...")
@@ -272,9 +302,7 @@ def run_rules_mode(
             return output_plan_path
         elif choice in ['n', 'no']:
             console.print("[bold red]Plan cancelled[/bold red]")
-            # Overwrite with empty plan
-            save_json({"folders_to_create": [], "moves": []}, output_plan_path)
-            return output_plan_path
+            return None
         elif choice in ['s', 'save']:
             return output_plan_path
         else:
@@ -364,7 +392,6 @@ def cmd_plan(args) -> int:
             # We need to change that behavior if we are streaming.
             
             # Let's write directly to args.output here and return
-            from .utils import save_jsonl
             
             print(f"[INFO] Streaming plan to {args.output}...")
             with open(args.output, 'w', encoding='utf-8') as f:
@@ -434,7 +461,7 @@ def cmd_apply(args) -> int:
                     root_str = header.get("root")
                     if root_str:
                         root = Path(root_str)
-            except:
+            except (ValueError, TypeError, KeyError):
                 pass
     
     if not root:
@@ -582,6 +609,8 @@ def cmd_run(args) -> int:
                     metadata_path=args.metadata_out,
                     precomputed_summary=summary
                 )
+                if plan_path is None:
+                    return 0
             else:
                 console.print("\n[bold cyan][STEP 2] Requesting restructuring plan from LLM...[/bold cyan]")
                 metadata = load_json(args.metadata_out)

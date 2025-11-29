@@ -487,9 +487,11 @@ def build_metadata_summary(metadata: dict) -> dict:
     for folder_name in sorted(folder_files.keys()):
         folder_file_list = folder_files[folder_name]
         
-        # Get random sample (up to 30 files)
+        # Get deterministic sample (up to 30 files) - sorted by rel_path for consistency
         sample_size = min(30, len(folder_file_list))
-        samples = random.sample(folder_file_list, sample_size)
+        # Sort by rel_path for deterministic selection instead of random
+        sorted_files = sorted(folder_file_list, key=lambda f: f.get("rel_path", ""))
+        samples = sorted_files[:sample_size]
         sample_paths = [f["rel_path"] for f in samples]
         
         # Extension breakdown for this folder
@@ -584,13 +586,10 @@ def summarize_stream(metadata_path: Path, sample_size: int = 5000) -> dict:
         top_folder = parts[0] if len(parts) > 1 else "(root files)"
         folder_sizes[top_folder] += size
         
-        # Reservoir sampling for global list
+        # Deterministic sampling for global list (first sample_size files)
+        # For determinism, we use first-come-first-served instead of reservoir sampling
         if len(reservoir) < sample_size:
             reservoir.append(item)
-        else:
-            j = random.randint(0, total_files - 1)
-            if j < sample_size:
-                reservoir[j] = item
         
         # Per-folder sampling (keep up to 30 per folder, max 500 folders)
         if top_folder in folder_files or len(folder_files) < 500:

@@ -16,15 +16,18 @@ DEFAULT_MODEL = "flash"
 MODEL_CONFIG = {
     "flash": {
         "max_output_tokens": 65536,
-        "temperature": 0.1,
+        "temperature": 0.0,  # Deterministic responses
+        "seed": 42,  # Seed for deterministic generation
     },
     "flash-lite": {
         "max_output_tokens": 32768,
-        "temperature": 0.1,
+        "temperature": 0.0,  # Deterministic responses
+        "seed": 42,  # Seed for deterministic generation
     },
     "pro": {
         "max_output_tokens": 65536,
-        "temperature": 0.1,
+        "temperature": 0.0,  # Deterministic responses
+        "seed": 42,  # Seed for deterministic generation
     },
 }
 

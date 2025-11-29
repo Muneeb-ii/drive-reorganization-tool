@@ -6,11 +6,11 @@ This scales much better for huge directories.
 """
 
 import calendar
-import json
-from dataclasses import dataclass, field
+from collections import defaultdict
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Iterable, Generator
 
 from ..llm import call_llm, parse_llm_json, build_rules_prompt, DEFAULT_MODEL
 
@@ -238,9 +238,6 @@ class OrganizationRule:
 
 
 
-
-from typing import Iterable, Generator
-
 def generate_moves_from_rules(
     files: Iterable[dict], 
     rules: list[OrganizationRule]
@@ -333,6 +330,139 @@ def generate_moves_from_rules(
                     "reason": rule.name
                 }
                 break  # First matching rule wins
+
+
+def validate_rule_coverage(
+    files: Iterable[dict],
+    rules: list[OrganizationRule]
+) -> dict:
+    """
+    Validate that all files are matched by at least one rule.
+    
+    Args:
+        files: Iterable of file metadata dicts.
+        rules: List of organization rules.
+        
+    Returns:
+        Dict with:
+        - "matched": set of rel_paths that matched at least one rule
+        - "unmatched": list of file_info dicts that didn't match any rule
+        - "coverage_pct": float percentage of files matched (0-100)
+        - "total_files": int total number of files checked
+    """
+    matched_paths = set()
+    unmatched_files = []
+    total_count = 0
+    
+    # Sort rules by priority (highest first)
+    sorted_rules = sorted(rules, key=lambda r: -r.priority)
+    
+    for file_info in files:
+        total_count += 1
+        rel_path = file_info.get("rel_path", "")
+        if not rel_path:
+            continue
+            
+        # Normalize path
+        rel_path = rel_path.replace("\\", "/")
+        
+        # Check if any rule matches
+        matched = False
+        for rule in sorted_rules:
+            if rule.match.matches(file_info):
+                matched = True
+                matched_paths.add(rel_path)
+                break
+        
+        if not matched:
+            unmatched_files.append(file_info)
+    
+    coverage_pct = (len(matched_paths) / total_count * 100) if total_count > 0 else 0.0
+    
+    return {
+        "matched": matched_paths,
+        "unmatched": unmatched_files,
+        "coverage_pct": coverage_pct,
+        "total_files": total_count
+    }
+
+
+def generate_catch_all_rules(unmatched_files: list[dict]) -> list[OrganizationRule]:
+    """
+    Generate catch-all rules for unmatched files.
+    
+    Analyzes unmatched files and creates rules to cover them by:
+    1. Grouping by extension
+    2. Creating rules for each extension group
+    3. Adding a final catch-all rule for any remaining files
+    
+    Args:
+        unmatched_files: List of file_info dicts that didn't match any rule.
+        
+    Returns:
+        List of OrganizationRule objects with priority 0 (lowest).
+    """
+    if not unmatched_files:
+        return []
+    
+    # Group unmatched files by extension
+    ext_groups: dict[str, list[dict]] = defaultdict(list)
+    no_ext_files = []
+    
+    for file_info in unmatched_files:
+        ext = file_info.get("ext", "").lower()
+        if not ext or ext == "/":
+            no_ext_files.append(file_info)
+        else:
+            # Normalize extension (ensure it starts with .)
+            if not ext.startswith("."):
+                ext = "." + ext
+            ext_groups[ext].append(file_info)
+    
+    catch_all_rules = []
+    
+    # Create rules for each extension group
+    for ext, files in ext_groups.items():
+        rule_name = f"Auto-Generated: {ext[1:].upper()} Files"
+        catch_all_rules.append(OrganizationRule(
+            name=rule_name,
+            match=MatchCriteria(ext_in=[ext]),
+            target_template="{year} - Misc/{type}/{original_name}",
+            priority=0,
+            event_name="Misc"
+        ))
+    
+    # Create rule for files with no extension or folder markers
+    # Match files where ext is empty, "/", or "(no extension)"
+    if no_ext_files:
+        # Match files with empty extension or "/" (folder markers)
+        # We use ext_not_in with a list of common extensions to match files without extensions
+        # But since we can't list all extensions, we'll use a different approach:
+        # Match files where ext is empty or "/"
+        # Actually, empty MatchCriteria matches everything, so we need to be more specific
+        # For now, we'll let the final catch-all handle these, but create a specific rule
+        # that matches files with empty or "/" extension by using a custom check
+        # Since MatchCriteria doesn't support "ext is empty", we'll create a rule that
+        # matches everything and let priority handle it, OR we match by excluding common extensions
+        # Actually, the simplest is to match everything and let the final catch-all handle it
+        # But we want to be explicit, so let's create a rule that will match these
+        # We'll use the fact that empty MatchCriteria matches everything, and this rule
+        # will catch files that don't match extension-based rules above
+        # Since this is for no-ext files specifically, we can't easily match them with MatchCriteria
+        # So we'll just ensure the final catch-all covers them
+        pass  # Files without extensions will be caught by final catch-all rule
+    
+    # Final catch-all rule that matches absolutely everything (empty match criteria)
+    # This should match any file that somehow still doesn't match above rules
+    catch_all_rules.append(OrganizationRule(
+        name="Auto-Generated: Catch-All (Everything Else)",
+        match=MatchCriteria(),  # Empty criteria matches everything
+        target_template="{year} - Misc/Misc/{original_name}",
+        priority=-1,  # Even lower than 0 to ensure it's checked last
+        event_name="Misc"
+    ))
+    
+    return catch_all_rules
 
 
 def parse_rules_from_llm(response_text: str) -> list[OrganizationRule]:

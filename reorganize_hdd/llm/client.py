@@ -82,11 +82,20 @@ def call_llm(prompt: str, model_name: str = DEFAULT_MODEL) -> str:
     # Create model instance
     model = genai.GenerativeModel(model_id)
     
-    # Generate response
+    # Generate response with deterministic settings
     generation_config = genai.types.GenerationConfig(
         max_output_tokens=config["max_output_tokens"],
         temperature=config["temperature"],
     )
+    
+    # Add seed if supported (for deterministic generation)
+    # Note: Some Gemini models may not support seed, but temperature=0 provides near-determinism
+    if "seed" in config:
+        try:
+            generation_config.seed = config["seed"]
+        except (AttributeError, TypeError):
+            # Seed not supported by this model/API version, temperature=0 is sufficient
+            pass
     
     response = model.generate_content(prompt, generation_config=generation_config)
     

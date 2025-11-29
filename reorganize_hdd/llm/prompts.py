@@ -257,15 +257,36 @@ Use these in target_template:
 - {{parent}} - Immediate parent folder name
 - {{original_name}} - Original filename with extension
 
+## CRITICAL: Coverage Requirements
+
+**YOU MUST ENSURE 100% FILE COVERAGE** - Every single file must be matched by at least one rule.
+
+1. **All Extensions Must Be Covered**: For each extension listed in "File Types (by extension)" above, you MUST create at least one rule that matches it. Do not skip any extensions.
+
+2. **Files in Subdirectories**: Rules must match files in subdirectories, not just root-level files. Use `path_contains_any` or `parent_name_contains_any` to match files in specific folders, OR create general rules that work for all locations (don't restrict to root only).
+
+3. **Example for Subdirectories**: 
+   - BAD: Rule only matches root files (no path/parent filters)
+   - GOOD: Rule matches `.fcp` files anywhere using `ext_in: [".fcp"]` without location restrictions
+   - GOOD: Rule matches files in specific folder using `parent_name_contains_any: ["ANNIE.KLOP"]`
+
+4. **Catch-All Rule Required**: You MUST include a final catch-all rule with priority 0 that matches ANY file with an empty match object `{{}}` or no restrictions. This ensures files you didn't anticipate are still organized.
+
+5. **Validation Checklist**: Before submitting, verify:
+   - Every extension in the histogram has at least one matching rule
+   - Files in subdirectories (like "ANNIE.KLOP/", "DVD.11.24.08/") are covered
+   - A catch-all rule exists for unmatched files
+
 ## Guidelines
 
-1. **Be CONSERVATIVE**: Only create rules for clear, beneficial reorganization.
+1. **100% Coverage is MANDATORY**: Every file must be matched. Review all extensions and ensure rules exist for each.
 2. **Preserve projects**: Do NOT match files inside application bundles (.app, .dvdproj, etc.).
 3. **Group by Event**: Use the "Detected Clusters" to create specific rules for events. Set `event_name` to a short, descriptive name (e.g., "Christmas", "Wedding", "Hawaii Trip").
 4. **Structure**: Use `{{year}} - {{event_name}}/{{type}}/` in target_template. The `event_name` field will be substituted.
 5. **Bundles**: If you see files with extension `/` (which represent folders like VIDEO_TS), keep them intact. Map them to `{{year}} - {{event_name}}/Misc/{{original_name}}`.
-6. **Misc**: Create a catch-all rule for files that don't fit events. Set `event_name` to "Misc" or leave empty.
-7. **Priority matters**: Specific event rules should have HIGH priority (e.g., 50). General rules (e.g., "All Photos") should have LOWER priority (e.g., 10).
+6. **Subdirectory Files**: Create rules that match files in subdirectories. Use `ext_in` without location restrictions, or use `path_contains_any`/`parent_name_contains_any` for specific folders. Do NOT create rules that only match root-level files unless explicitly needed.
+7. **Priority matters**: Specific event rules should have HIGH priority (e.g., 50). General rules (e.g., "All Photos") should have LOWER priority (e.g., 10). Catch-all rule must have priority 0 (lowest).
+8. **Catch-All Rule**: You MUST include a final rule with priority 0 that matches ANY file (empty match object: `{{}}` or no match criteria) to ensure no files are left behind. Name it "Catch-All Misc". Target: "{{year}} - Misc/{{original_name}}".
 
 ## Output
 
