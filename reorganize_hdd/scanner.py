@@ -96,8 +96,7 @@ def scan_directory(
                     "ext": "/" # Special marker for folders
                 }
                 scanned_count += 1
-                if scanned_count % 5000 == 0:
-                    print(f"Scanning: {scanned_count} files...", end='\r')
+                scanned_count += 1
             except (PermissionError, OSError):
                 pass
             
@@ -106,8 +105,6 @@ def scan_directory(
         # 3. Process Files
         for filename in filenames:
             scanned_count += 1
-            if scanned_count % 5000 == 0:
-                print(f"Scanning: {scanned_count} files...", end='\r')
                 
             filepath = Path(dirpath) / filename
             
@@ -138,9 +135,11 @@ def scan_directory(
                 modified = datetime.fromtimestamp(stat.st_mtime).isoformat(timespec='seconds')
                 
                 # Try to get EXIF date for images
+                # Optimization: Skip small files (likely icons/thumbnails) to avoid high IOPS on HDD
                 date_taken = None
-                if ext in {'.jpg', '.jpeg', '.png', '.tiff', '.webp', '.heic'}:
-                    date_taken = get_exif_date(filepath)
+                if stat.st_size > 32 * 1024: # 32KB
+                    if ext in {'.jpg', '.jpeg', '.png', '.tiff', '.webp', '.heic'}:
+                        date_taken = get_exif_date(filepath)
                 
                 yield {
                     "rel_path": rel_path_str,
@@ -153,7 +152,7 @@ def scan_directory(
                 # print(f"[WARN] Skipping inaccessible file: {filepath} ({e})")
                 continue
     
-    print(f"Scanning: {scanned_count} files... Done!")
+                continue
     
     if skipped_by_filter > 0:
         print(f"[INFO] Skipped {skipped_by_filter} files by filter")
@@ -165,7 +164,8 @@ def scan_and_summarize(
     min_size: int = 0,
     ext_include: set[str] | None = None,
     ext_exclude: set[str] | None = None,
-    sample_size: int = 5000
+    sample_size: int = 5000,
+    progress_callback: callable = None
 ) -> dict:
     """
     Scan directory, stream to JSON file, and build summary in memory.
@@ -234,11 +234,17 @@ def scan_and_summarize(
                 if len(folder_files[top_folder]) < 30:
                     folder_files[top_folder].append(item)
             
+            if progress_callback and total_files % 100 == 0:
+                progress_callback(total_files, item["rel_path"])
+                
             yield item
 
     # Run the scan and stream to file
     scanner_gen = scan_directory(root, min_size, ext_include, ext_exclude)
     save_json_stream(item_processor(scanner_gen), output_path, str(root), generated_at)
+    
+    if progress_callback:
+        progress_callback(total_files, "Analyzing metadata (building summaries)...")
     
     # Build folder summaries
     folder_summaries = []
@@ -261,6 +267,8 @@ def scan_and_summarize(
         })
         
     # Detect clusters on the reservoir sample
+    if progress_callback:
+        progress_callback(total_files, "Analyzing metadata (detecting clusters)...")
     clusters = detect_clusters(reservoir)
     
     return {

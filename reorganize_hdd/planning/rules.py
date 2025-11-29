@@ -198,6 +198,28 @@ class OrganizationRule:
         # Ensure path ends with filename
         if not target.endswith(original_name):
             target = target.rstrip("/") + "/" + original_name
+            
+        # Deduplicate path segments (e.g. "Misc/Misc" -> "Misc")
+        # This happens when {event_name} defaults to "Misc" and the template also has "Misc"
+        parts = target.split("/")
+        deduped_parts = []
+        if parts:
+            deduped_parts.append(parts[0])
+            for i in range(1, len(parts)):
+                prev = parts[i-1]
+                curr = parts[i]
+                
+                # Check for exact duplicate
+                if curr == prev:
+                    continue
+                    
+                # Check for suffix duplication (e.g. "2023 - Misc" followed by "Misc")
+                # We check if the previous part ends with " - {curr}" or " {curr}"
+                if prev.endswith(f" - {curr}") or prev.endswith(f" {curr}"):
+                    continue
+                    
+                deduped_parts.append(curr)
+            target = "/".join(deduped_parts)
         
         return target
     
@@ -239,6 +261,7 @@ def generate_moves_from_rules(
         Move dicts with old_rel, new_rel, and reason.
     """
     seen_destinations = set()
+    next_counters = {} # Map of target_path -> next_available_counter
     
     # Sort rules by priority (highest first)
     sorted_rules = sorted(rules, key=lambda r: -r.priority)
@@ -272,10 +295,13 @@ def generate_moves_from_rules(
                     if parent == ".":
                         parent = ""
                     
-                    counter = 1
+                    # Optimization: Use cached counter if available
+                    # We key by the original target path (new_rel)
+                    counter = next_counters.get(new_rel, 1)
+                    
                     collision_resolved = False
                     while True:
-                        if counter > 10000:
+                        if counter > 100000: # Increased limit since it's fast now
                             # Safety break to prevent infinite loops
                             print(f"[WARNING] Collision limit reached for {new_rel}. Skipping move.")
                             break
@@ -286,7 +312,12 @@ def generate_moves_from_rules(
                             candidate = f"{stem}_{counter}{suffix}"
                         # Normalize slashes
                         candidate = candidate.replace("\\", "/")
+                        
                         if candidate not in seen_destinations:
+                            # Found a slot!
+                            # Update next_counters for this base path so next time we start here
+                            next_counters[new_rel] = counter + 1
+                            
                             new_rel = candidate
                             collision_resolved = True
                             break

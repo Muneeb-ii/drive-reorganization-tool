@@ -144,7 +144,7 @@ def run_automatic_mode(
     
     # Final confirmation
     if combined_plan['moves']:
-        console.print("\n[bold yellow]Proceed with this plan? [y]es / [n]o / [s]ave plan only[/bold yellow]")
+        console.print("\n[bold yellow]Proceed with this plan? \\[y]es / \\[n]o / \\[s]ave plan only[/bold yellow]")
         
         if not sys.stdin.isatty():
             print_warning("Non-interactive mode detected. Auto-approving plan.")
@@ -198,7 +198,8 @@ def run_rules_mode(
     # Get rules from LLM
     console.print("\n[bold cyan][STEP 2] Requesting organization rules from LLM...[/bold cyan]")
     try:
-        rules = call_llm_for_rules(summary, model_name)
+        with console.status("[bold green]Asking LLM for rules...[/bold green]"):
+            rules = call_llm_for_rules(summary, model_name)
         print_success(f"Received {len(rules)} rules")
         
         if rules:
@@ -259,7 +260,7 @@ def run_rules_mode(
     # Interactive confirmation is tricky with streaming plan.
     # We'll just ask to proceed based on the rules shown above.
     
-    console.print("\n[bold yellow]Proceed with this plan? [y]es / [n]o / [s]ave plan only[/bold yellow]")
+    console.print("\n[bold yellow]Proceed with this plan? \\[y]es / \\[n]o / \\[s]ave plan only[/bold yellow]")
     
     if not sys.stdin.isatty():
         print_warning("Non-interactive mode detected. Auto-approving plan.")
@@ -501,8 +502,33 @@ def cmd_run(args) -> int:
     try:
         # Step 1: Scan
         console.print("\n[bold cyan][STEP 1] Scanning directory...[/bold cyan]")
-        with console.status("[bold green]Scanning...[/bold green]"):
-            summary = scan_and_summarize(root, args.metadata_out, args.min_size, ext_include, ext_exclude)
+        
+        from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
+        
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            TimeElapsedColumn(),
+            console=console
+        ) as progress:
+            task_id = progress.add_task("Scanning...", total=None)
+            
+            def progress_cb(count, path):
+                # Show count and last part of path
+                short_path = str(path)
+                if len(short_path) > 40:
+                    short_path = "..." + short_path[-37:]
+                progress.update(task_id, description=f"Scanning: {count} files... {short_path}")
+            
+            summary = scan_and_summarize(
+                root, 
+                args.metadata_out, 
+                args.min_size, 
+                ext_include, 
+                ext_exclude,
+                progress_callback=progress_cb
+            )
+            
         console.print(f"[INFO] Found {summary['total_files']} files")
         
         # Step 2: Plan
@@ -546,17 +572,16 @@ def cmd_run(args) -> int:
         else:
             if args.mode == "rules":
                 console.print("\n[bold cyan][STEP 2] Running rules mode...[/bold cyan]")
-                with console.status("[bold green]Generating rules...[/bold green]"):
-                    plan_path = run_rules_mode(
-                        root, 
-                        {}, 
-                        args.model, 
-                        args.dry_run, 
-                        args.plan_out,
-                        args.delay,
-                        metadata_path=args.metadata_out,
-                        precomputed_summary=summary
-                    )
+                plan_path = run_rules_mode(
+                    root, 
+                    {}, 
+                    args.model, 
+                    args.dry_run, 
+                    args.plan_out,
+                    args.delay,
+                    metadata_path=args.metadata_out,
+                    precomputed_summary=summary
+                )
             else:
                 console.print("\n[bold cyan][STEP 2] Requesting restructuring plan from LLM...[/bold cyan]")
                 metadata = load_json(args.metadata_out)
@@ -619,8 +644,8 @@ def main() -> int:
     # --- SCAN command ---
     scan_parser = subparsers.add_parser("scan", help="Scan directory and generate metadata")
     scan_parser.add_argument("root", type=Path, help="Directory to scan")
-    scan_parser.add_argument("-o", "--output", type=Path, default=Path("metadata.json"),
-                            help="Output metadata file (default: metadata.json)")
+    scan_parser.add_argument("-o", "--output", type=Path, default=Path("metadata.jsonl"),
+                            help="Output metadata file (default: metadata.jsonl)")
     scan_parser.add_argument("--min-size", type=int, default=0, metavar="BYTES",
                             help="Only include files larger than N bytes")
     scan_parser.add_argument("--ext-include", type=str, metavar="EXTS",
@@ -632,8 +657,8 @@ def main() -> int:
     # --- PLAN command ---
     plan_parser = subparsers.add_parser("plan", help="Generate plan from metadata")
     plan_parser.add_argument("metadata", type=str, help="Metadata file to use")
-    plan_parser.add_argument("-o", "--output", type=Path, default=Path("plan.json"),
-                            help="Output plan file (default: plan.json)")
+    plan_parser.add_argument("-o", "--output", type=Path, default=Path("plan.jsonl"),
+                            help="Output plan file (default: plan.jsonl)")
     plan_parser.add_argument("--mode", choices=["direct", "rules"], default="direct",
                             help="Planning mode: direct (explicit moves) or rules (rule-based)")
     plan_parser.add_argument("--model", type=str, default=DEFAULT_MODEL, choices=model_choices,
@@ -675,9 +700,9 @@ def main() -> int:
                            help="Only include specific extensions")
     run_parser.add_argument("--ext-exclude", type=str, metavar="EXTS",
                            help="Exclude specific extensions")
-    run_parser.add_argument("--metadata-out", type=Path, default=Path("metadata.json"),
+    run_parser.add_argument("--metadata-out", type=Path, default=Path("metadata.jsonl"),
                            help="Metadata output file")
-    run_parser.add_argument("--plan-out", type=Path, default=Path("plan.json"),
+    run_parser.add_argument("--plan-out", type=Path, default=Path("plan.jsonl"),
                            help="Plan output file")
     run_parser.add_argument("--report-out", type=Path, default=Path("report.json"),
                            help="Report output file")
