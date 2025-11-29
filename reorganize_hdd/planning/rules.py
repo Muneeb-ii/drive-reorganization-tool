@@ -153,8 +153,15 @@ class OrganizationRule:
         modified = file_info.get("date_taken") or file_info.get("modified", "")
         
         # Parse filename and parent
+        if not rel_path:
+            return rel_path
+            
         parts = rel_path.split("/")
         original_name = parts[-1]
+        if not original_name:
+            # Should not happen if rel_path is valid, but safe check
+            return rel_path
+            
         parent = parts[-2] if len(parts) > 1 else ""
         
         # Parse date info
@@ -248,6 +255,8 @@ def generate_moves_from_rules(
         for rule in sorted_rules:
             if rule.match.matches(file_info):
                 new_rel = rule.render_target(file_info)
+                # Normalize new_rel immediately
+                new_rel = new_rel.replace("\\", "/")
                 
                 # Skip no-op moves
                 if old_rel == new_rel:

@@ -294,19 +294,16 @@ def cleanup_empty_dirs(root: Path, keep_folders: set[str] = None) -> list[str]:
             continue
             
         # Check if this folder should be kept (e.g. newly created)
+        # Also check if inside a bundle
         try:
             rel_path = Path(dirpath).relative_to(root)
             rel_path_str = str(rel_path).replace("\\", "/")
+            
             if keep_folders and rel_path_str in keep_folders:
                 continue
-        except ValueError:
-            continue
-            
-        # Check if we are inside a bundle
-        # We check relative path segments
-        try:
-            rel_path = Path(dirpath).relative_to(root)
+                
             parts = rel_path.parts
+
             
             # If any part of the path is a bundle, protect it and its children
             # Note: We iterate through all parts. If 'MyBundle.dspproj' is in the path,
