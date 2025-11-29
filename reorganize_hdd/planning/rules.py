@@ -44,7 +44,6 @@ class MatchCriteria:
         ext = file_info.get("ext", "").lower()
         rel_path = file_info.get("rel_path", "")
         size = file_info.get("size_bytes", 0)
-        size = file_info.get("size_bytes", 0)
         # Prefer date_taken (EXIF) over modified date
         modified = file_info.get("date_taken") or file_info.get("modified", "")
         
@@ -150,8 +149,6 @@ class OrganizationRule:
         """
         rel_path = file_info.get("rel_path", "")
         ext = file_info.get("ext", "").lstrip(".")
-        rel_path = file_info.get("rel_path", "")
-        ext = file_info.get("ext", "").lstrip(".")
         # Prefer date_taken (EXIF) over modified date
         modified = file_info.get("date_taken") or file_info.get("modified", "")
         
@@ -241,6 +238,11 @@ def generate_moves_from_rules(
     
     for file_info in files:
         old_rel = file_info.get("rel_path", "")
+        if not old_rel:
+            continue
+            
+        # Normalize old_rel immediately for consistent comparison
+        old_rel = old_rel.replace("\\", "/")
         
         # Find first matching rule
         for rule in sorted_rules:
@@ -262,11 +264,11 @@ def generate_moves_from_rules(
                         parent = ""
                     
                     counter = 1
+                    collision_resolved = False
                     while True:
                         if counter > 10000:
                             # Safety break to prevent infinite loops
                             print(f"[WARNING] Collision limit reached for {new_rel}. Skipping move.")
-                            new_rel = old_rel # Cancel move
                             break
                             
                         if parent:
@@ -277,8 +279,12 @@ def generate_moves_from_rules(
                         candidate = candidate.replace("\\", "/")
                         if candidate not in seen_destinations:
                             new_rel = candidate
+                            collision_resolved = True
                             break
                         counter += 1
+                    
+                    if not collision_resolved:
+                        break # Skip this move
                 
                 seen_destinations.add(new_rel)
                 yield {

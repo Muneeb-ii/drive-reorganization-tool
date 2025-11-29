@@ -53,7 +53,12 @@ def _move_file(src: Path, dst: Path, old_rel: str, new_rel: str, root_device: in
                 res["error"] = f"Failed to create parent dir: {e}"
                 return res
         
-        shutil.move(str(src), str(dst))
+        try:
+            shutil.move(str(src), str(dst))
+        except FileExistsError:
+            res["error"] = "Destination exists (race condition)"
+            return res
+            
         res["status"] = "moved"
         return res
         
