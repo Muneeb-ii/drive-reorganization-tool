@@ -19,7 +19,7 @@ from .scanner import build_metadata, build_metadata_summary, scan_and_summarize
 from .executor import apply_plan
 from .planning import validate_plan, call_llm_for_plan, call_llm_for_folder
 from .planning.rules import generate_moves_from_rules, call_llm_for_rules
-from .utils import save_json, load_json, is_macos_bundle, load_metadata_files_stream
+from .utils import save_json, load_json, is_macos_bundle, load_metadata_files_stream, console, print_header, print_error, print_warning, print_success, print_plan_table
 from .llm import GEMINI_MODELS, DEFAULT_MODEL
 
 
@@ -70,9 +70,6 @@ def run_automatic_mode(
 ) -> dict:
     """
     Run automatic mode - process all folders without prompts.
-    
-    Args:
-        mode: "direct" for explicit moves, "rules" for rule-based.
     """
     if mode == "rules":
         return run_rules_mode(root, metadata, model_name, dry_run, delay)
@@ -80,11 +77,7 @@ def run_automatic_mode(
     folders = get_top_level_folders(metadata)
     all_folder_names = sorted(folders.keys())
     
-    print(f"\n{'='*60}")
-    print("AUTOMATIC MODE - Processing All Folders")
-    print(f"{'='*60}")
-    print(f"Found {len(folders)} top-level folders")
-    print(f"{'='*60}")
+    print_header("AUTOMATIC MODE", f"Processing {len(folders)} top-level folders")
     
     combined_plan = {
         "folders_to_create": [],
@@ -95,80 +88,65 @@ def run_automatic_mode(
     skipped = 0
     errors = []
     
-    for i, folder_name in enumerate(sorted(folders.keys()), 1):
-        files = folders[folder_name]
-        
-        print(f"\n[{i}/{len(folders)}] {folder_name} ({len(files)} files)...", end=" ", flush=True)
-        
-        if is_macos_bundle(folder_name):
-            print("SKIP (bundle)")
-            skipped += 1
-            continue
-        
-        try:
-            folder_metadata = build_folder_metadata(str(root), folder_name, files)
-            folder_plan = call_llm_for_folder(folder_metadata, all_folder_names, model_name)
+    with console.status("[bold green]Processing folders...[/bold green]") as status:
+        for i, folder_name in enumerate(sorted(folders.keys()), 1):
+            files = folders[folder_name]
+            status.update(f"[bold green]Processing {folder_name} ({i}/{len(folders)})...[/bold green]")
             
-            if delay > 0:
-                time.sleep(delay)
+            if is_macos_bundle(folder_name):
+                console.print(f"[dim]Skip bundle: {folder_name}[/dim]")
+                skipped += 1
+                continue
             
-            # Filter no-op moves
-            folder_plan['moves'] = [
-                m for m in folder_plan.get('moves', [])
-                if m.get('old_rel', '').strip() != m.get('new_rel', '').strip()
-            ]
-            
-            move_count = len(folder_plan.get('moves', []))
-            if move_count > 0:
-                print(f"OK ({move_count} moves)")
-                combined_plan["folders_to_create"].extend(folder_plan.get("folders_to_create", []))
-                combined_plan["moves"].extend(folder_plan.get("moves", []))
-            else:
-                print("OK (no changes needed)")
-            
-            processed += 1
-            
-        except Exception as e:
-            error_msg = str(e)[:50]
-            print(f"ERROR ({error_msg})")
-            errors.append(f"{folder_name}: {error_msg}")
-            skipped += 1
-            continue
+            try:
+                folder_metadata = build_folder_metadata(str(root), folder_name, files)
+                folder_plan = call_llm_for_folder(folder_metadata, all_folder_names, model_name)
+                
+                if delay > 0:
+                    time.sleep(delay)
+                
+                # Filter no-op moves
+                folder_plan['moves'] = [
+                    m for m in folder_plan.get('moves', [])
+                    if m.get('old_rel', '').strip() != m.get('new_rel', '').strip()
+                ]
+                
+                move_count = len(folder_plan.get('moves', []))
+                if move_count > 0:
+                    console.print(f"[green]✓ {folder_name}: {move_count} moves[/green]")
+                    combined_plan["folders_to_create"].extend(folder_plan.get("folders_to_create", []))
+                    combined_plan["moves"].extend(folder_plan.get("moves", []))
+                else:
+                    console.print(f"[dim]✓ {folder_name}: No changes[/dim]")
+                
+                processed += 1
+                
+            except Exception as e:
+                error_msg = str(e)[:50]
+                console.print(f"[red]✗ {folder_name}: {error_msg}[/red]")
+                errors.append(f"{folder_name}: {error_msg}")
+                skipped += 1
+                continue
     
     # Deduplicate
     combined_plan["folders_to_create"] = list(set(combined_plan["folders_to_create"]))
     
     # Show summary
-    print(f"\n{'='*60}")
-    print("AUTOMATIC MODE COMPLETE - SUMMARY")
-    print(f"{'='*60}")
-    print(f"Processed:     {processed} folders")
-    print(f"Skipped:       {skipped} folders")
-    print(f"Errors:        {len(errors)}")
-    print(f"New folders:   {len(combined_plan['folders_to_create'])}")
-    print(f"Total moves:   {len(combined_plan['moves'])}")
-    print(f"{'='*60}")
+    print_plan_table(combined_plan)
     
     if errors:
-        print("\nErrors encountered:")
+        console.print("\n[bold red]Errors encountered:[/bold red]")
         for err in errors[:5]:
-            print(f"  - {err}")
+            console.print(f"  - {err}")
         if len(errors) > 5:
-            print(f"  ... and {len(errors) - 5} more")
-    
-    if combined_plan['moves']:
-        print("\nSample moves (first 10):")
-        for move in combined_plan['moves'][:10]:
-            print(f"  • {move['old_rel'][:50]}")
-            print(f"    → {move['new_rel'][:50]}")
+            console.print(f"  ... and {len(errors) - 5} more")
     
     # Final confirmation
     if combined_plan['moves']:
-        print(f"\n{'='*60}")
-        print("Proceed with this plan? [y]es / [n]o / [s]ave plan only")
+        console.print("\n[bold yellow]Proceed with this plan? [y]es / [n]o / [s]ave plan only[/bold yellow]")
         
         if not sys.stdin.isatty():
-            print("[WARN] Non-interactive mode detected. Auto-approving plan.")
+            print_warning("Non-interactive mode detected. Auto-approving plan.")
             return combined_plan
             
         while True:
@@ -176,15 +154,15 @@ def run_automatic_mode(
             if choice in ['y', 'yes', '']:
                 return combined_plan
             elif choice in ['n', 'no']:
-                print("[ABORT] Plan cancelled")
+                console.print("[bold red]Plan cancelled[/bold red]")
                 return {"folders_to_create": [], "moves": []}
             elif choice in ['s', 'save']:
-                print("[INFO] Plan will be saved but not applied")
+                console.print("[blue]Plan will be saved but not applied[/blue]")
                 return combined_plan
             else:
-                print("Invalid choice. Enter y, n, or s")
+                console.print("Invalid choice. Enter y, n, or s")
     else:
-        print("\n[INFO] No moves generated - all folders are well-organized!")
+        print_success("No moves generated - all folders are well-organized!")
         return combined_plan
 
 
@@ -200,56 +178,54 @@ def run_rules_mode(
     """
     Run rule-based mode - LLM designs rules, Python applies them.
     """
-    print(f"\n{'='*60}")
-    print("RULES MODE - LLM Designs Organization Rules")
-    print(f"{'='*60}")
+    print_header("RULES MODE", "LLM Designs Organization Rules")
     
     # Build summary
     if precomputed_summary:
-        print("[STEP 1] Using precomputed metadata summary...")
+        console.print("[dim]Using precomputed metadata summary...[/dim]")
         summary = precomputed_summary
     else:
-        print("[STEP 1] Building metadata summary...")
+        console.print("[dim]Building metadata summary...[/dim]")
         summary = build_metadata_summary(metadata)
         
-    print(f"[INFO] Summary: {summary['total_files']} files, {len(summary['folders'])} folders")
+    console.print(f"[INFO] Summary: {summary['total_files']} files, {len(summary['folders'])} folders")
     
     # Get rules from LLM
-    print("\n[STEP 2] Requesting organization rules from LLM...")
+    console.print("\n[bold cyan][STEP 2] Requesting organization rules from LLM...[/bold cyan]")
     try:
         rules = call_llm_for_rules(summary, model_name)
-        print(f"[INFO] Received {len(rules)} rules")
+        print_success(f"Received {len(rules)} rules")
         
         if rules:
-            print("\nProposed rules:")
+            console.print("\n[bold]Proposed rules:[/bold]")
             for r in rules:
-                print(f"  • {r.name}")
-                print(f"    Match: {r.match.ext_in or 'any'}")
-                print(f"    Target: {r.target_template}")
+                console.print(f"  • [cyan]{r.name}[/cyan]")
+                console.print(f"    Match: {r.match.ext_in or 'any'}")
+                console.print(f"    Target: {r.target_template}")
     except Exception as e:
-        print(f"[ERROR] Failed to get rules: {e}")
+        print_error(f"Failed to get rules: {e}")
         return {"folders_to_create": [], "moves": []}
     
     if delay > 0:
         time.sleep(delay)
     
     if not rules:
-        print("\n[INFO] No rules proposed - directory already well-organized!")
+        print_success("No rules proposed - directory already well-organized!")
         return {"folders_to_create": [], "moves": []}
     
     # Apply rules locally
-    print("\n[STEP 3] Applying rules to generate moves...")
+    console.print("\n[bold cyan][STEP 3] Applying rules to generate moves...[/bold cyan]")
     
     # Determine source of files (memory or stream)
     files_source = metadata.get("files", [])
     if not files_source and metadata_path and metadata_path.exists():
-        print(f"[INFO] Streaming files from {metadata_path}...")
+        console.print(f"[dim]Streaming files from {metadata_path}...[/dim]")
         files_source = load_metadata_files_stream(metadata_path)
     elif not files_source:
-        print("[WARN] No files found in metadata to apply rules to.")
+        print_warning("No files found in metadata to apply rules to.")
         
     moves = generate_moves_from_rules(files_source, rules)
-    print(f"[INFO] Generated {len(moves)} moves from rules")
+    print_success(f"Generated {len(moves)} moves from rules")
     
     plan = {
         "folders_to_create": [],
@@ -258,16 +234,12 @@ def run_rules_mode(
     }
     
     if moves:
-        print("\nSample moves (first 10):")
-        for move in moves[:10]:
-            print(f"  • {move['old_rel'][:50]}")
-            print(f"    → {move['new_rel'][:50]}")
+        print_plan_table(plan)
         
-        print(f"\n{'='*60}")
-        print("Proceed with this plan? [y]es / [n]o / [s]ave plan only")
+        console.print("\n[bold yellow]Proceed with this plan? [y]es / [n]o / [s]ave plan only[/bold yellow]")
         
         if not sys.stdin.isatty():
-            print("[WARN] Non-interactive mode detected. Auto-approving plan.")
+            print_warning("Non-interactive mode detected. Auto-approving plan.")
             return plan
             
         while True:
@@ -275,12 +247,12 @@ def run_rules_mode(
             if choice in ['y', 'yes', '']:
                 return plan
             elif choice in ['n', 'no']:
-                print("[ABORT] Plan cancelled")
+                console.print("[bold red]Plan cancelled[/bold red]")
                 return {"folders_to_create": [], "moves": []}
             elif choice in ['s', 'save']:
                 return plan
             else:
-                print("Invalid choice. Enter y, n, or s")
+                console.print("Invalid choice. Enter y, n, or s")
     
     return plan
 
@@ -432,65 +404,52 @@ def cmd_run(args) -> int:
     if args.auto:
         mode_str += " (automatic)"
     
-    print("=" * 60)
-    print("HDD Folder Restructure Tool v2")
-    print("=" * 60)
-    print(f"Root:     {root}")
-    print(f"Dry-run:  {args.dry_run}")
-    print(f"Model:    {args.model}")
-    print(f"Mode:     {mode_str}")
-    if args.delay > 0:
-        print(f"Delay:    {args.delay}s between API calls")
-    print("=" * 60)
+    print_header("HDD Folder Restructure Tool v2", f"Root: {root}\nMode: {mode_str}\nModel: {args.model}")
     
     try:
         # Step 1: Scan
-        print("\n[STEP 1] Scanning directory...")
-        # Use streaming scan and get summary directly
-        summary = scan_and_summarize(root, args.metadata_out, args.min_size, ext_include, ext_exclude)
-        print(f"[INFO] Found {summary['total_files']} files")
-        # Metadata is already saved to args.metadata_out
+        console.print("\n[bold cyan][STEP 1] Scanning directory...[/bold cyan]")
+        with console.status("[bold green]Scanning...[/bold green]"):
+            summary = scan_and_summarize(root, args.metadata_out, args.min_size, ext_include, ext_exclude)
+        console.print(f"[INFO] Found {summary['total_files']} files")
         
         # Step 2: Plan
         if args.skip_llm:
-            print(f"\n[STEP 2] Loading existing plan from {args.plan_out}...")
+            console.print(f"\n[bold cyan][STEP 2] Loading existing plan from {args.plan_out}...[/bold cyan]")
             if not args.plan_out.exists():
-                print(f"[ERROR] Plan file not found: {args.plan_out}")
+                print_error(f"Plan file not found: {args.plan_out}")
                 return 1
             plan = load_json(args.plan_out)
         elif args.auto:
-            # Auto mode likely needs full metadata for direct planning
-            # We'll load it here if needed, or refactor auto mode later.
-            # For now, let's load it to be safe if user chose auto mode.
             metadata = load_json(args.metadata_out)
             plan = run_automatic_mode(root, metadata, args.model, args.dry_run, args.delay, args.mode)
             save_json(plan, args.plan_out)
             
             if not plan.get("moves"):
-                print("\n[INFO] No moves in plan. Nothing to do.")
+                console.print("\n[INFO] No moves in plan. Nothing to do.")
                 return 0
         else:
             if args.mode == "rules":
-                print("\n[STEP 2] Running rules mode...")
-                # Pass summary and metadata path for streaming
-                plan = run_rules_mode(
-                    root, 
-                    {}, # Empty metadata dict
-                    args.model, 
-                    args.dry_run, 
-                    args.delay,
-                    metadata_path=args.metadata_out,
-                    precomputed_summary=summary
-                )
+                console.print("\n[bold cyan][STEP 2] Running rules mode...[/bold cyan]")
+                with console.status("[bold green]Generating rules...[/bold green]"):
+                    plan = run_rules_mode(
+                        root, 
+                        {}, 
+                        args.model, 
+                        args.dry_run, 
+                        args.delay,
+                        metadata_path=args.metadata_out,
+                        precomputed_summary=summary
+                    )
             else:
-                print("\n[STEP 2] Requesting restructuring plan from LLM...")
-                # Direct mode needs full metadata
+                console.print("\n[bold cyan][STEP 2] Requesting restructuring plan from LLM...[/bold cyan]")
                 metadata = load_json(args.metadata_out)
-                plan = call_llm_for_plan(metadata, args.model)
+                with console.status("[bold green]Thinking...[/bold green]"):
+                    plan = call_llm_for_plan(metadata, args.model)
             save_json(plan, args.plan_out)
         
         # Step 3: Validate
-        print("\n[STEP 3] Validating plan...")
+        console.print("\n[bold cyan][STEP 3] Validating plan...[/bold cyan]")
         valid_moves = validate_plan(root, plan)
         validated_plan = {
             "folders_to_create": plan.get("folders_to_create", []),
@@ -498,25 +457,23 @@ def cmd_run(args) -> int:
         }
         
         # Step 4: Apply
-        print("\n[STEP 4] Applying plan...")
+        console.print("\n[bold cyan][STEP 4] Applying plan...[/bold cyan]")
         try:
             report = apply_plan(root, validated_plan, args.dry_run, args.allow_cross_device)
             save_json(report, args.report_out)
         except RuntimeError as e:
-            print(f"\n[ERROR] {e}")
+            print_error(str(e))
             return 1
         
         # Summary
-        print("\n" + "=" * 60)
-        print("COMPLETE")
-        print("=" * 60)
-        print(f"Metadata:  {args.metadata_out}")
-        print(f"Plan:      {args.plan_out}")
-        print(f"Report:    {args.report_out}")
+        print_success("Operation Complete!")
+        console.print(f"Metadata:  {args.metadata_out}")
+        console.print(f"Plan:      {args.plan_out}")
+        console.print(f"Report:    {args.report_out}")
         
         if args.dry_run:
-            print("\n[NOTE] This was a DRY-RUN. No files were actually moved.")
-            print("       Run without --dry-run to apply changes.")
+            print_warning("This was a DRY-RUN. No files were actually moved.")
+            console.print("       Run without --dry-run to apply changes.")
         
         return 0
         

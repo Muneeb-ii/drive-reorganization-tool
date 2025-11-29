@@ -11,6 +11,39 @@ from datetime import datetime, timedelta
 from pathlib import Path
 import re
 from .utils import BUNDLE_FOLDERS, is_macos_bundle
+from PIL import Image, UnidentifiedImageError
+from PIL.ExifTags import TAGS
+
+def get_exif_date(filepath: Path) -> str | None:
+    """Extract the 'DateTimeOriginal' from an image's EXIF data."""
+    try:
+        with Image.open(filepath) as img:
+            exif = img.getexif()
+            if not exif:
+                return None
+            
+            # Look for DateTimeOriginal (36867) or DateTime (306)
+            # We iterate to find the tag name because IDs are constant but looking up by name is clearer
+            for tag_id in exif:
+                tag = TAGS.get(tag_id, tag_id)
+                if tag == 'DateTimeOriginal':
+                    date_str = exif.get(tag_id)
+                    # Format is usually "YYYY:MM:DD HH:MM:SS"
+                    # Convert to ISO "YYYY-MM-DDTHH:MM:SS"
+                    if date_str and len(date_str) >= 19:
+                        return date_str[:10].replace(':', '-') + 'T' + date_str[11:]
+                
+            # Fallback to DateTime if Original not found
+            for tag_id in exif:
+                tag = TAGS.get(tag_id, tag_id)
+                if tag == 'DateTime':
+                    date_str = exif.get(tag_id)
+                    if date_str and len(date_str) >= 19:
+                        return date_str[:10].replace(':', '-') + 'T' + date_str[11:]
+                        
+    except (UnidentifiedImageError, OSError, Exception):
+        pass
+    return None
 
 
 def scan_directory(
@@ -104,10 +137,16 @@ def scan_directory(
                 rel_path_str = str(rel_path).replace(os.sep, '/')
                 modified = datetime.fromtimestamp(stat.st_mtime).isoformat(timespec='seconds')
                 
+                # Try to get EXIF date for images
+                date_taken = None
+                if ext in {'.jpg', '.jpeg', '.png', '.tiff', '.webp', '.heic'}:
+                    date_taken = get_exif_date(filepath)
+                
                 yield {
                     "rel_path": rel_path_str,
                     "size_bytes": stat.st_size,
                     "modified": modified,
+                    "date_taken": date_taken,
                     "ext": ext
                 }
             except (PermissionError, OSError) as e:
@@ -282,7 +321,12 @@ def detect_clusters(files: list[dict], min_files: int = 10, gap_hours: int = 24)
     for stem, group in name_groups.items():
         if len(group) >= min_files:
             # Found a name cluster
-            dates = [f["modified"] for f in group if f.get("modified")]
+            # Use date_taken if available, else modified
+            dates = []
+            for f in group:
+                d = f.get("date_taken") or f.get("modified")
+                if d:
+                    dates.append(d)
             dates.sort()
             
             clusters.append({
@@ -299,8 +343,15 @@ def detect_clusters(files: list[dict], min_files: int = 10, gap_hours: int = 24)
             
     # 2. Time Clustering (Stage 2 - Fallback)
     # Sort remaining files by time
-    valid_files = [f for f in ungrouped_files if f.get("modified")]
-    valid_files.sort(key=lambda x: x["modified"])
+    valid_files = []
+    for f in ungrouped_files:
+        d = f.get("date_taken") or f.get("modified")
+        if d:
+            # Store the effective date in the dict temporarily for sorting
+            f["_effective_date"] = d
+            valid_files.append(f)
+            
+    valid_files.sort(key=lambda x: x["_effective_date"])
     
     if not valid_files:
         return clusters
@@ -312,8 +363,8 @@ def detect_clusters(files: list[dict], min_files: int = 10, gap_hours: int = 24)
         curr = valid_files[i]
         
         try:
-            t1 = datetime.fromisoformat(prev["modified"])
-            t2 = datetime.fromisoformat(curr["modified"])
+            t1 = datetime.fromisoformat(prev["_effective_date"])
+            t2 = datetime.fromisoformat(curr["_effective_date"])
             
             if (t2 - t1) < timedelta(hours=gap_hours):
                 current_cluster.append(curr)
@@ -324,8 +375,8 @@ def detect_clusters(files: list[dict], min_files: int = 10, gap_hours: int = 24)
                         "type": "time",
                         "name_hint": f"Event_{t1.strftime('%Y-%m-%d')}",
                         "count": len(current_cluster),
-                        "date_start": current_cluster[0]["modified"],
-                        "date_end": current_cluster[-1]["modified"],
+                        "date_start": current_cluster[0]["_effective_date"],
+                        "date_end": current_cluster[-1]["_effective_date"],
                         "sample_files": [f["rel_path"] for f in current_cluster[:5]]
                     })
                 current_cluster = [curr]
@@ -334,13 +385,13 @@ def detect_clusters(files: list[dict], min_files: int = 10, gap_hours: int = 24)
             
     # Check last cluster
     if len(current_cluster) >= min_files:
-        t1 = datetime.fromisoformat(current_cluster[0]["modified"])
+        t1 = datetime.fromisoformat(current_cluster[0]["_effective_date"])
         clusters.append({
             "type": "time",
             "name_hint": f"Event_{t1.strftime('%Y-%m-%d')}",
             "count": len(current_cluster),
-            "date_start": current_cluster[0]["modified"],
-            "date_end": current_cluster[-1]["modified"],
+            "date_start": current_cluster[0]["_effective_date"],
+            "date_end": current_cluster[-1]["_effective_date"],
             "sample_files": [f["rel_path"] for f in current_cluster[:5]]
         })
         

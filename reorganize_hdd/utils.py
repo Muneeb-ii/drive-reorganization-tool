@@ -4,11 +4,57 @@ Utility functions for the HDD Folder Restructure Tool.
 Includes:
 - JSON save/load helpers
 - macOS bundle detection
+- UI helpers
 """
 
 import json
+import os
+import sys
 from pathlib import Path
-from typing import Any
+from typing import Generator, Any
+from rich.console import Console
+from rich.table import Table
+from rich.tree import Tree
+from rich.panel import Panel
+
+# Global console instance
+console = Console()
+
+def print_header(title: str, subtitle: str = ""):
+    """Print a styled header."""
+    console.print(Panel(f"[bold blue]{title}[/bold blue]\n[italic]{subtitle}[/italic]", expand=False))
+
+def print_plan_table(plan: dict):
+    """Print a summary table of the plan."""
+    moves = plan.get("moves", [])
+    folders = plan.get("folders_to_create", [])
+    
+    table = Table(title="Plan Summary")
+    table.add_column("Metric", style="cyan")
+    table.add_column("Count", style="magenta")
+    
+    table.add_row("Moves", str(len(moves)))
+    table.add_row("New Folders", str(len(folders)))
+    
+    console.print(table)
+    
+    if moves:
+        tree = Tree("[bold green]Sample Moves[/bold green]")
+        for move in moves[:10]:
+            tree.add(f"[yellow]{move['old_rel']}[/yellow] -> [blue]{move['new_rel']}[/blue]")
+        if len(moves) > 10:
+            tree.add(f"[italic]... and {len(moves)-10} more[/italic]")
+        console.print(tree)
+
+def print_error(msg: str):
+    console.print(f"[bold red]ERROR:[/bold red] {msg}")
+
+def print_warning(msg: str):
+    console.print(f"[bold yellow]WARNING:[/bold yellow] {msg}")
+
+def print_success(msg: str):
+    console.print(f"[bold green]SUCCESS:[/bold green] {msg}")
+
 
 # -----------------------------------------------------------------------------
 # macOS Bundle Extensions

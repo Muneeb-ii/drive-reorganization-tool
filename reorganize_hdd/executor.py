@@ -6,8 +6,45 @@ Applies validated plans to the filesystem.
 
 import os
 import shutil
+import json
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
+from tqdm import tqdm
+from .utils import save_json
+
+
+def _move_file(src: Path, dst: Path, old_rel: str, new_rel: str, root_device: int, allow_cross_device: bool) -> dict:
+    """Helper to move a single file, safe for threads."""
+    res = {"old_rel": old_rel, "new_rel": new_rel, "status": "skipped", "error": None}
+    
+    try:
+        if dst.exists():
+            res["error"] = "Destination exists"
+            return res
+        
+        if not src.exists():
+            res["error"] = "Source not found"
+            return res
+
+        # Cross-device check
+        if not allow_cross_device:
+            # os.stat can be slow, but necessary for safety
+            # Optimization: pass root_device and only check if we suspect a mount point?
+            # For now, stick to safety.
+            src_dev = os.stat(src).st_dev
+            dst_dev = os.stat(dst.parent).st_dev
+            if src_dev != root_device or dst_dev != root_device:
+                res["error"] = "Cross-device move blocked"
+                return res
+        
+        shutil.move(str(src), str(dst))
+        res["status"] = "moved"
+        return res
+        
+    except Exception as e:
+        res["error"] = str(e)
+        return res
 
 
 def apply_plan(
@@ -18,15 +55,6 @@ def apply_plan(
 ) -> dict:
     """
     Apply (or simulate) the restructuring plan.
-    
-    Args:
-        root: The root directory path.
-        plan: The validated restructuring plan.
-        dry_run: If True, simulate only (no filesystem changes).
-        allow_cross_device: If True, allow moves across different devices.
-        
-    Returns:
-        A report dict with details of what was done (or would be done).
     """
     root = root.resolve()
     if not root.exists():
@@ -35,81 +63,95 @@ def apply_plan(
     root_device = os.stat(root).st_dev
     created_folders: list[str] = []
     executed_moves: list[dict] = []
+    failed_moves: list[dict] = []
     
     mode = "DRY-RUN" if dry_run else "APPLY"
     print(f"\n[{mode}] Starting plan execution...")
     
-    # Step 1: Create folders from folders_to_create
-    for folder_rel in plan.get("folders_to_create", []):
+    # --- Step 0: Generate Undo Plan (if not dry run) ---
+    if not dry_run:
+        undo_moves = []
+        for move in plan.get("moves", []):
+            undo_moves.append({
+                "old_rel": move["new_rel"],
+                "new_rel": move["old_rel"],
+                "reason": "Undo: " + move.get("reason", "")
+            })
+        undo_plan = {
+            "root": str(root),
+            "created_at": datetime.now().isoformat(),
+            "type": "undo",
+            "moves": undo_moves
+        }
+        save_json(undo_plan, Path("undo_plan.json"))
+        print(f"[SAFETY] Undo plan saved to 'undo_plan.json'")
+
+    # --- Step 1: Create folders ---
+    folders_to_create = plan.get("folders_to_create", [])
+    # Also add parents of all destinations to be safe
+    for move in plan.get("moves", []):
+        dst_parent = Path(move["new_rel"]).parent
+        if str(dst_parent) != ".":
+            folders_to_create.append(str(dst_parent))
+            
+    folders_to_create = sorted(list(set(folders_to_create)))
+    
+    print(f"[INFO] Verifying/Creating {len(folders_to_create)} folders...")
+    for folder_rel in folders_to_create:
         folder_rel = folder_rel.replace("\\", "/").strip("/")
+        if not folder_rel: continue
+        
         folder_path = root / folder_rel
         
         if not folder_path.exists():
             if dry_run:
-                print(f"  [WOULD CREATE] {folder_rel}/")
+                # print(f"  [WOULD CREATE] {folder_rel}/")
+                pass
             else:
                 folder_path.mkdir(parents=True, exist_ok=True)
-                print(f"  [CREATED] {folder_rel}/")
             created_folders.append(folder_rel)
-    
-    # Step 2: Process moves
-    for move in plan.get("moves", []):
-        old_rel = move["old_rel"]
-        new_rel = move["new_rel"]
-        reason = move.get("reason", "")
-        
-        src_path = root / old_rel
-        dst_path = root / new_rel
-        
-        # Ensure destination parent exists
-        dst_parent = dst_path.parent
-        if not dst_parent.exists():
-            dst_parent_rel = str(dst_parent.relative_to(root)).replace(os.sep, "/")
-            if dry_run:
-                print(f"  [WOULD CREATE] {dst_parent_rel}/")
-            else:
-                dst_parent.mkdir(parents=True, exist_ok=True)
-                print(f"  [CREATED] {dst_parent_rel}/")
-            if dst_parent_rel not in created_folders:
-                created_folders.append(dst_parent_rel)
-        
-        # Perform the move
-        if dry_run:
-            print(f"  [WOULD MOVE] {old_rel} -> {new_rel}")
-        else:
-            # Check for existing file at destination
-            if dst_path.exists():
-                print(f"  [WARN] Destination exists, skipping: {new_rel}")
-                continue
             
-            # Check if source still exists
-            if not src_path.exists():
-                print(f"  [WARN] Source no longer exists, skipping: {old_rel}")
-                continue
-
-            # Guard against cross-device moves (would become copy+delete)
-            if not allow_cross_device:
-                src_device = os.stat(src_path).st_dev
-                dst_device = os.stat(dst_parent).st_dev
-                if src_device != root_device or dst_device != root_device:
-                    print(f"  [ERROR] Cross-device move blocked: {old_rel}")
-                    print("          Use --allow-cross-device to permit this")
-                    continue
-            
-            try:
-                shutil.move(str(src_path), str(dst_path))
-                print(f"  [MOVED] {old_rel} -> {new_rel}")
-            except Exception as e:
-                print(f"  [ERROR] Failed to move {old_rel}: {e}")
-                continue
-        
-        executed_moves.append({
-            "old_rel": old_rel,
-            "new_rel": new_rel,
-            "reason": reason
-        })
+    # --- Step 2: Process moves (Parallel) ---
+    moves = plan.get("moves", [])
+    print(f"[INFO] Processing {len(moves)} moves...")
     
-    # Step 3: Cleanup empty directories
+    if dry_run:
+        # Sequential print for dry run
+        for move in moves[:10]:
+            print(f"  [WOULD MOVE] {move['old_rel']} -> {move['new_rel']}")
+        if len(moves) > 10:
+            print(f"  ... and {len(moves)-10} more")
+        executed_moves = moves # Assume all succeed in dry run
+    else:
+        # Parallel Execution
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            futures = {}
+            for move in moves:
+                src = root / move["old_rel"]
+                dst = root / move["new_rel"]
+                f = executor.submit(
+                    _move_file, 
+                    src, dst, 
+                    move["old_rel"], move["new_rel"], 
+                    root_device, allow_cross_device
+                )
+                futures[f] = move
+            
+            # Progress bar
+            with tqdm(total=len(moves), unit="file") as pbar:
+                for future in as_completed(futures):
+                    res = future.result()
+                    if res["status"] == "moved":
+                        executed_moves.append({
+                            "old_rel": res["old_rel"],
+                            "new_rel": res["new_rel"]
+                        })
+                    else:
+                        failed_moves.append(res)
+                        tqdm.write(f"[ERROR] {res['error']}: {res['old_rel']}")
+                    pbar.update(1)
+    
+    # --- Step 3: Cleanup ---
     cleaned_folders = []
     if not dry_run:
         print("\n[APPLY] Cleaning up empty directories...")
@@ -123,15 +165,17 @@ def apply_plan(
         "executed_at": datetime.now().isoformat(timespec='seconds'),
         "created_folders": created_folders,
         "moves": executed_moves,
+        "failed_moves": failed_moves,
         "cleaned_folders": cleaned_folders,
         "summary": {
             "total_folders_created": len(created_folders),
             "total_moves": len(executed_moves),
+            "failed_moves": len(failed_moves),
             "total_folders_removed": len(cleaned_folders)
         }
     }
     
-    print(f"\n[{mode}] Complete: {len(created_folders)} folders created, {len(executed_moves)} moves, {len(cleaned_folders)} folders removed")
+    print(f"\n[{mode}] Complete: {len(executed_moves)} moved, {len(failed_moves)} failed, {len(cleaned_folders)} cleaned")
     
     return report
 
