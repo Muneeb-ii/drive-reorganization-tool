@@ -9,11 +9,13 @@ Now features **Event-Based Organization** to automatically group photos and vide
 ## Key Features
 
 - **AI-Powered Organization**: Uses LLMs (via Gemini) to understand your file structure and create personalized organization rules.
-- **Large Drive Support (Streaming)**: Optimized for huge datasets (e.g., 2TB+, 1M+ files). Uses streaming (JSONL) to keep memory usage low and constant.
+- **Enterprise-Grade Streaming**: Optimized for huge datasets (e.g., 2TB+, 1M+ files). Uses JSONL streaming to ensure constant, low memory usage (O(1)).
+- **100% Coverage Guarantee**: Automatically generates "Catch-All" rules to ensure NO file is left behind.
+- **Deterministic & Reproducible**: Uses deterministic sampling to ensure that running the tool twice on the same data yields the same result.
 - **Safety First**:
     - **Dry Run**: Always previews changes before applying them.
-    - **Undo Capability**: Automatically generates an undo plan for every operation.
-    - **Collision Handling**: Smartly handles duplicate filenames without overwriting.
+    - **Undo Capability**: Automatically generates a streaming undo plan for every operation.
+    - **Collision Handling**: Smartly handles duplicate filenames with O(1) resolution.
     - **Cross-Device Protection**: Prevents accidental moves across different drives.
 - **Smart Metadata**: Extracts EXIF dates from photos to organize by "Date Taken".
 - **Robust Execution**: Parallel processing for fast execution, with automatic path normalization for cross-platform compatibility.
@@ -186,6 +188,9 @@ Ensure your external drive is mounted and accessible. The tool checks this to pr
 
 ### "Plan has destination collisions"
 This should no longer happen! The tool now automatically resolves collisions by appending a counter (e.g., `_1`, `_2`) to the filename.
+
+### "Cleanup seems stuck"
+On large external drives, the cleanup phase (removing empty directories) can take a few minutes due to I/O latency. This is normal. The tool is recursively checking every folder.
 
 ### "LLM returned invalid JSON"
 The tool includes robust recovery logic for truncated JSON. If it still fails, try running again or reducing the batch size.
