@@ -44,7 +44,9 @@ class MatchCriteria:
         ext = file_info.get("ext", "").lower()
         rel_path = file_info.get("rel_path", "")
         size = file_info.get("size_bytes", 0)
-        modified = file_info.get("modified", "")
+        size = file_info.get("size_bytes", 0)
+        # Prefer date_taken (EXIF) over modified date
+        modified = file_info.get("date_taken") or file_info.get("modified", "")
         
         # Get parent folder name
         parts = rel_path.split("/")
@@ -148,7 +150,10 @@ class OrganizationRule:
         """
         rel_path = file_info.get("rel_path", "")
         ext = file_info.get("ext", "").lstrip(".")
-        modified = file_info.get("modified", "")
+        rel_path = file_info.get("rel_path", "")
+        ext = file_info.get("ext", "").lstrip(".")
+        # Prefer date_taken (EXIF) over modified date
+        modified = file_info.get("date_taken") or file_info.get("modified", "")
         
         # Parse filename and parent
         parts = rel_path.split("/")
@@ -208,12 +213,14 @@ class OrganizationRule:
 
 
 
+from typing import Iterable, Generator
+
 def generate_moves_from_rules(
-    files: list[dict], 
+    files: Iterable[dict], 
     rules: list[OrganizationRule]
-) -> list[dict]:
+) -> Generator[dict, None, None]:
     """
-    Generate a list of moves by applying rules to files.
+    Generate a stream of moves by applying rules to files.
     
     Rules are applied in priority order (highest first). The first matching
     rule determines where a file is moved.
@@ -221,13 +228,12 @@ def generate_moves_from_rules(
     Handles destination collisions by appending a counter to the filename.
     
     Args:
-        files: List of file metadata dicts.
+        files: Iterable of file metadata dicts.
         rules: List of organization rules.
         
-    Returns:
-        List of move dicts with old_rel, new_rel, and reason.
+    Yields:
+        Move dicts with old_rel, new_rel, and reason.
     """
-    moves = []
     seen_destinations = set()
     
     # Sort rules by priority (highest first)
@@ -257,6 +263,12 @@ def generate_moves_from_rules(
                     
                     counter = 1
                     while True:
+                        if counter > 10000:
+                            # Safety break to prevent infinite loops
+                            print(f"[WARNING] Collision limit reached for {new_rel}. Skipping move.")
+                            new_rel = old_rel # Cancel move
+                            break
+                            
                         if parent:
                             candidate = f"{parent}/{stem}_{counter}{suffix}"
                         else:
@@ -269,14 +281,12 @@ def generate_moves_from_rules(
                         counter += 1
                 
                 seen_destinations.add(new_rel)
-                moves.append({
+                yield {
                     "old_rel": old_rel,
                     "new_rel": new_rel,
                     "reason": rule.name
-                })
+                }
                 break  # First matching rule wins
-    
-    return moves
 
 
 def parse_rules_from_llm(response_text: str) -> list[OrganizationRule]:

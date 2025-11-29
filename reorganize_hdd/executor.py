@@ -29,13 +29,28 @@ def _move_file(src: Path, dst: Path, old_rel: str, new_rel: str, root_device: in
 
         # Cross-device check
         if not allow_cross_device:
-            # os.stat can be slow, but necessary for safety
-            # Optimization: pass root_device and only check if we suspect a mount point?
-            # For now, stick to safety.
+            # Strict check: Both src and dst (parent) must be on root_device
             src_dev = os.stat(src).st_dev
-            dst_dev = os.stat(dst.parent).st_dev
-            if src_dev != root_device or dst_dev != root_device:
-                res["error"] = "Cross-device move blocked"
+            
+            # For dst, check parent if it exists, otherwise assume it will be created on root_device
+            # (since we are creating it under root)
+            dst_parent = dst.parent
+            if dst_parent.exists():
+                dst_dev = os.stat(dst_parent).st_dev
+                if dst_dev != root_device:
+                    res["error"] = f"Destination parent on different device ({dst_dev} != {root_device})"
+                    return res
+            
+            if src_dev != root_device:
+                 res["error"] = f"Source on different device ({src_dev} != {root_device})"
+                 return res
+
+        # Defensive: Ensure parent exists
+        if not dst.parent.exists():
+            try:
+                dst.parent.mkdir(parents=True, exist_ok=True)
+            except OSError as e:
+                res["error"] = f"Failed to create parent dir: {e}"
                 return res
         
         shutil.move(str(src), str(dst))
@@ -49,140 +64,212 @@ def _move_file(src: Path, dst: Path, old_rel: str, new_rel: str, root_device: in
 
 def apply_plan(
     root: Path, 
-    plan: dict, 
+    plan: dict | Path, 
     dry_run: bool = True,
     allow_cross_device: bool = False
 ) -> dict:
     """
     Apply (or simulate) the restructuring plan.
+    
+    Args:
+        root: Root directory.
+        plan: Plan dict OR Path to plan.jsonl file.
+        dry_run: If True, simulate moves.
+        allow_cross_device: If True, allow moves across devices.
     """
+    from .utils import load_jsonl, save_jsonl
+    
     root = root.resolve()
     if not root.exists():
         raise RuntimeError(f"Root directory not found: {root}\nIs the drive connected?")
         
     root_device = os.stat(root).st_dev
     created_folders: list[str] = []
-    executed_moves: list[dict] = []
-    failed_moves: list[dict] = []
+    executed_moves_count = 0
+    failed_moves_count = 0
+    cleaned_folders_count = 0
+    
+    # Load plan metadata/header
+    folders_to_create = []
+    moves_source = []
+    
+    if isinstance(plan, dict):
+        folders_to_create = plan.get("folders_to_create", [])
+        moves_source = plan.get("moves", [])
+        total_moves = len(moves_source)
+    else:
+        # Streaming mode
+        print(f"[INFO] Streaming plan from {plan}...")
+        plan_gen = load_jsonl(plan)
+        try:
+            header = next(plan_gen)
+            if header.get("type") in ["plan_header", "undo_header"]:
+                folders_to_create = header.get("folders_to_create", [])
+                moves_source = plan_gen
+            else:
+                plan_gen = load_jsonl(plan)
+                moves_source = plan_gen
+        except StopIteration:
+            pass
+        total_moves = None
+    
+    def valid_moves_filter(gen):
+        for item in gen:
+            if "old_rel" in item and "new_rel" in item:
+                # Normalize paths immediately
+                item["old_rel"] = item["old_rel"].replace("\\", "/").strip("/")
+                item["new_rel"] = item["new_rel"].replace("\\", "/").strip("/")
+                yield item
+                
+    moves_source = valid_moves_filter(moves_source)
     
     mode = "DRY-RUN" if dry_run else "APPLY"
     print(f"\n[{mode}] Starting plan execution...")
     
-    # --- Step 0: Generate Undo Plan (if not dry run) ---
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    undo_filename = f"undo_plan_{timestamp}.jsonl"
+    undo_file = Path(undo_filename)
+    
+    counter = 1
+    while undo_file.exists():
+        undo_file = Path(f"undo_plan_{timestamp}_{counter}.jsonl")
+        counter += 1
+        
+    undo_file_handle = None
+    
     if not dry_run:
-        undo_moves = []
-        for move in plan.get("moves", []):
-            undo_moves.append({
-                "old_rel": move["new_rel"],
-                "new_rel": move["old_rel"],
-                "reason": "Undo: " + move.get("reason", "")
-            })
-        undo_plan = {
+        undo_file_handle = open(undo_file, 'w', encoding='utf-8')
+        undo_header = {
             "root": str(root),
             "created_at": datetime.now().isoformat(),
-            "type": "undo",
-            "moves": undo_moves
+            "type": "undo_header",
+            "folders_to_create": []
         }
-        save_json(undo_plan, Path("undo_plan.json"))
-        print(f"[SAFETY] Undo plan saved to 'undo_plan.json'")
+        undo_file_handle.write(json.dumps(undo_header, ensure_ascii=False) + '\n')
+        print(f"[SAFETY] Undo plan streaming to '{undo_file}'")
 
-    # --- Step 1: Create folders ---
-    folders_to_create = plan.get("folders_to_create", [])
-    # Also add parents of all destinations to be safe
-    for move in plan.get("moves", []):
-        dst_parent = Path(move["new_rel"]).parent
-        if str(dst_parent) != ".":
-            folders_to_create.append(str(dst_parent))
-            
-    folders_to_create = sorted(list(set(folders_to_create)))
-    
-    print(f"[INFO] Verifying/Creating {len(folders_to_create)} folders...")
-    for folder_rel in folders_to_create:
-        folder_rel = folder_rel.replace("\\", "/").strip("/")
-        if not folder_rel: continue
+    try:
+        unique_folders = sorted(list(set(folders_to_create)))
         
-        folder_path = root / folder_rel
+        print(f"[INFO] Verifying/Creating {len(unique_folders)} folders...")
+        for folder_rel in unique_folders:
+            folder_rel = folder_rel.replace("\\", "/").strip("/")
+            if not folder_rel: continue
+            
+            folder_path = root / folder_rel
+            
+            if not folder_path.exists():
+                if dry_run:
+                    pass
+                else:
+                    folder_path.mkdir(parents=True, exist_ok=True)
+                created_folders.append(folder_rel)
+                
+        print(f"[INFO] Processing moves...")
         
-        if not folder_path.exists():
-            if dry_run:
-                # print(f"  [WOULD CREATE] {folder_rel}/")
-                pass
-            else:
-                folder_path.mkdir(parents=True, exist_ok=True)
-            created_folders.append(folder_rel)
+        if dry_run:
+            count = 0
+            for move in moves_source:
+                count += 1
+                if count <= 10:
+                    print(f"  [WOULD MOVE] {move['old_rel']} -> {move['new_rel']}")
+            if count > 10:
+                print(f"  ... and {count-10} more")
+            executed_moves_count = count
+        else:
+            BATCH_SIZE = 1000
+            batch = []
             
-    # --- Step 2: Process moves (Parallel) ---
-    moves = plan.get("moves", [])
-    print(f"[INFO] Processing {len(moves)} moves...")
-    
-    if dry_run:
-        # Sequential print for dry run
-        for move in moves[:10]:
-            print(f"  [WOULD MOVE] {move['old_rel']} -> {move['new_rel']}")
-        if len(moves) > 10:
-            print(f"  ... and {len(moves)-10} more")
-        executed_moves = moves # Assume all succeed in dry run
-    else:
-        # Parallel Execution
-        with ThreadPoolExecutor(max_workers=8) as executor:
-            futures = {}
-            for move in moves:
-                src = root / move["old_rel"]
-                dst = root / move["new_rel"]
-                f = executor.submit(
-                    _move_file, 
-                    src, dst, 
-                    move["old_rel"], move["new_rel"], 
-                    root_device, allow_cross_device
-                )
-                futures[f] = move
-            
-            # Progress bar
-            with tqdm(total=len(moves), unit="file") as pbar:
-                for future in as_completed(futures):
-                    res = future.result()
-                    if res["status"] == "moved":
-                        executed_moves.append({
-                            "old_rel": res["old_rel"],
-                            "new_rel": res["new_rel"]
-                        })
-                    else:
-                        failed_moves.append(res)
-                        tqdm.write(f"[ERROR] {res['error']}: {res['old_rel']}")
-                    pbar.update(1)
-    
-    # --- Step 3: Cleanup ---
-    cleaned_folders = []
-    if not dry_run:
-        print("\n[APPLY] Cleaning up empty directories...")
-        cleaned_folders = cleanup_empty_dirs(root)
-        print(f"  [CLEANUP] Removed {len(cleaned_folders)} empty folders")
-    
-    # Build report
-    report = {
-        "root": str(root),
-        "dry_run": dry_run,
-        "executed_at": datetime.now().isoformat(timespec='seconds'),
-        "created_folders": created_folders,
-        "moves": executed_moves,
-        "failed_moves": failed_moves,
-        "cleaned_folders": cleaned_folders,
-        "summary": {
-            "total_folders_created": len(created_folders),
-            "total_moves": len(executed_moves),
-            "failed_moves": len(failed_moves),
-            "total_folders_removed": len(cleaned_folders)
+            with ThreadPoolExecutor(max_workers=8) as executor:
+                with tqdm(total=total_moves, unit="file") as pbar:
+                    def process_batch(current_batch):
+                        nonlocal executed_moves_count, failed_moves_count
+                        
+                        # Ensure parent directories exist for this batch
+                        # We do this sequentially before submitting threads to avoid race conditions 
+                        # (though mkdir exist_ok=True is usually safe, this is cleaner)
+                        for m in current_batch:
+                            # Normalize path separators
+                            new_rel_norm = m["new_rel"].replace("\\", "/")
+                            dst_path = root / new_rel_norm
+                            
+                            if not dry_run:
+                                try:
+                                    dst_path.parent.mkdir(parents=True, exist_ok=True)
+                                except OSError:
+                                    pass
+
+                        futures = {
+                            executor.submit(
+                                _move_file, 
+                                root / m["old_rel"], 
+                                root / m["new_rel"], 
+                                m["old_rel"], 
+                                m["new_rel"], 
+                                root_device, 
+                                allow_cross_device
+                            ): m for m in current_batch
+                        }
+                        
+                        for future in as_completed(futures):
+                            res = future.result()
+                            if res["status"] == "moved":
+                                executed_moves_count += 1
+                                # Write to undo stream
+                                if undo_file_handle:
+                                    undo_move = {
+                                        "old_rel": res["new_rel"],
+                                        "new_rel": res["old_rel"],
+                                        "reason": "Undo move"
+                                    }
+                                    undo_file_handle.write(json.dumps(undo_move, ensure_ascii=False) + '\n')
+                            else:
+                                failed_moves_count += 1
+                                tqdm.write(f"[ERROR] {res['error']}: {res['old_rel']}")
+                            pbar.update(1)
+                    
+                    for move in moves_source:
+                        batch.append(move)
+                        if len(batch) >= BATCH_SIZE:
+                            process_batch(batch)
+                            batch = []
+                    
+                    if batch:
+                        process_batch(batch)
+        
+        # --- Step 3: Cleanup ---
+        if not dry_run:
+            print("\n[APPLY] Cleaning up empty directories...")
+            # Pass created_folders to protect them from cleanup
+            # We convert to set for faster lookup
+            keep_set = set(created_folders)
+            cleaned_folders = cleanup_empty_dirs(root, keep_folders=keep_set)
+            cleaned_folders_count = len(cleaned_folders)
+            print(f"  [CLEANUP] Removed {cleaned_folders_count} empty folders")
+        
+        # Build report
+        report = {
+            "root": str(root),
+            "dry_run": dry_run,
+            "executed_at": datetime.now().isoformat(timespec='seconds'),
+            "created_folders_count": len(created_folders),
+            "executed_moves_count": executed_moves_count,
+            "failed_moves_count": failed_moves_count,
+            "cleaned_folders_count": cleaned_folders_count
         }
-    }
-    
-    print(f"\n[{mode}] Complete: {len(executed_moves)} moved, {len(failed_moves)} failed, {len(cleaned_folders)} cleaned")
-    
-    return report
+        
+        print(f"\n[{mode}] Complete: {executed_moves_count} moved, {failed_moves_count} failed, {cleaned_folders_count} cleaned")
+        
+        return report
+
+    finally:
+        if undo_file_handle:
+            undo_file_handle.close()
 
 
 from .utils import is_known_bundle_folder, is_macos_bundle
 
-def cleanup_empty_dirs(root: Path) -> list[str]:
+def cleanup_empty_dirs(root: Path, keep_folders: set[str] = None) -> list[str]:
     """
     Recursively remove empty directories, starting from the bottom up.
     Skips directories that are inside known bundles (e.g. .dspproj, VIDEO_TS).
@@ -199,6 +286,15 @@ def cleanup_empty_dirs(root: Path) -> list[str]:
     for dirpath, dirnames, filenames in os.walk(root, topdown=False):
         # Skip the root itself
         if os.path.samefile(dirpath, root):
+            continue
+            
+        # Check if this folder should be kept (e.g. newly created)
+        try:
+            rel_path = Path(dirpath).relative_to(root)
+            rel_path_str = str(rel_path).replace("\\", "/")
+            if keep_folders and rel_path_str in keep_folders:
+                continue
+        except ValueError:
             continue
             
         # Check if we are inside a bundle

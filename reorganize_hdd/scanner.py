@@ -513,4 +513,115 @@ def build_metadata_summary(metadata: dict) -> dict:
     }
 
 
+def summarize_stream(metadata_path: Path, sample_size: int = 5000) -> dict:
+    """
+    Build a summary from a metadata.jsonl file stream.
+    
+    Args:
+        metadata_path: Path to metadata.jsonl.
+        sample_size: Number of files to keep for reservoir sampling.
+        
+    Returns:
+        Summary dict suitable for LLM.
+    """
+    from .utils import load_metadata_files_stream
+    
+    # Stats containers
+    total_files = 0
+    total_size = 0
+    ext_counts: dict[str, int] = defaultdict(int)
+    ext_sizes: dict[str, int] = defaultdict(int)
+    year_counts: dict[str, int] = defaultdict(int)
+    folder_files: dict[str, list[dict]] = defaultdict(list)
+    folder_sizes: dict[str, int] = defaultdict(int)
+    
+    # Reservoir for clustering/sampling
+    reservoir = []
+    
+    root_path = ""
+    
+    # Read stream
+    # We need to get root from header if possible, but load_metadata_files_stream skips header.
+    # We can peek header manually or just infer/ignore root.
+    # Let's peek header.
+    with open(metadata_path, 'r', encoding='utf-8') as f:
+        try:
+            first_line = f.readline()
+            header = json.loads(first_line)
+            if isinstance(header, dict):
+                root_path = header.get("root", "")
+        except:
+            pass
+            
+    stream = load_metadata_files_stream(metadata_path)
+    
+    for item in stream:
+        total_files += 1
+        size = item.get("size_bytes", 0)
+        total_size += size
+        
+        # Update stats
+        ext = item.get("ext", "")
+        ext_key = ext if ext else "(no extension)"
+        ext_counts[ext_key] += 1
+        ext_sizes[ext_key] += size
+        
+        modified = item.get("modified", "")
+        if modified:
+            year = modified[:4]
+            year_counts[year] += 1
+        
+        rel_path = item["rel_path"]
+        parts = rel_path.split("/")
+        top_folder = parts[0] if len(parts) > 1 else "(root files)"
+        folder_sizes[top_folder] += size
+        
+        # Reservoir sampling for global list
+        if len(reservoir) < sample_size:
+            reservoir.append(item)
+        else:
+            j = random.randint(0, total_files - 1)
+            if j < sample_size:
+                reservoir[j] = item
+        
+        # Per-folder sampling (keep up to 30 per folder, max 500 folders)
+        if top_folder in folder_files or len(folder_files) < 500:
+            if len(folder_files[top_folder]) < 30:
+                folder_files[top_folder].append(item)
+                
+    # Build folder summaries
+    folder_summaries = []
+    for folder_name in sorted(folder_files.keys()):
+        samples = folder_files[folder_name]
+        sample_paths = [f["rel_path"] for f in samples]
+        
+        # Extension breakdown for this folder
+        folder_ext_counts: dict[str, int] = defaultdict(int)
+        for f in samples:
+            ext = f.get("ext", "") or "(no extension)"
+            folder_ext_counts[ext] += 1
+            
+        folder_summaries.append({
+            "name": folder_name,
+            "file_count": 0, # Approximate or unknown
+            "total_size_bytes": folder_sizes[folder_name],
+            "extensions": dict(sorted(folder_ext_counts.items(), key=lambda x: -x[1])),
+            "sample_paths": sample_paths
+        })
+        
+    # Detect clusters on the reservoir sample
+    clusters = detect_clusters(reservoir)
+    
+    return {
+        "root": root_path,
+        "total_files": total_files,
+        "total_size_bytes": total_size,
+        "extension_histogram": dict(sorted(ext_counts.items(), key=lambda x: -x[1])),
+        "extension_sizes": dict(sorted(ext_sizes.items(), key=lambda x: -x[1])),
+        "year_distribution": dict(sorted(year_counts.items())),
+        "folders": folder_summaries,
+        "clusters": clusters
+    }
+
+
 

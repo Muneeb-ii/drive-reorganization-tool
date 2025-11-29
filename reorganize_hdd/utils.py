@@ -134,58 +134,6 @@ def save_json(data: Any, path: Path) -> None:
     print(f"[INFO] Saved: {path}")
 
 
-def save_json_stream(
-    item_generator, 
-    path: Path, 
-    root_path: str, 
-    generated_at: str
-) -> None:
-    """
-    Save a generator of items to a JSON file in a streaming fashion.
-    Structure: {"root": ..., "generated_at": ..., "files": [ ... ]}
-    
-    Args:
-        item_generator: Generator yielding dicts (files).
-        path: Output file path.
-        root_path: Value for 'root' key.
-        generated_at: Value for 'generated_at' key.
-    """
-    with open(path, 'w', encoding='utf-8') as f:
-        # Write header
-        header = {
-            "root": root_path,
-            "generated_at": generated_at,
-            "files": []
-        }
-        # Dump header but remove the closing brackets to append items
-        # This is a bit hacky but avoids manual JSON construction of the header
-        json_str = json.dumps(header, indent=2, ensure_ascii=False)
-        # Remove the last closing bracket and the 'files' empty list closing
-        # json_str ends with: ... "files": []\n}
-        # We want to stop before the [
-        
-        # Safer manual approach:
-        f.write('{\n')
-        f.write(f'  "root": "{root_path}",\n')
-        f.write(f'  "generated_at": "{generated_at}",\n')
-        f.write('  "files": [\n')
-        
-        first = True
-        for item in item_generator:
-            if not first:
-                f.write(',\n')
-            
-            # Dump item with indentation
-            item_str = json.dumps(item, ensure_ascii=False)
-            f.write(f'    {item_str}')
-            first = False
-            
-        # Write footer
-        f.write('\n  ]\n}')
-    
-    print(f"[INFO] Saved: {path}")
-
-
 def load_json(path: Path) -> Any:
     """
     Load data from a JSON file.
@@ -200,48 +148,105 @@ def load_json(path: Path) -> Any:
         return json.load(f)
 
 
-def load_metadata_files_stream(path: Path):
+def save_jsonl(item_generator: Generator[Any, None, None], path: Path) -> None:
     """
-    Yield file dicts from a metadata.json file without loading the whole file.
-    Assumes the file was written by save_json_stream with one item per line.
+    Save items to a JSONL file (Line-delimited JSON).
     
     Args:
-        path: Path to metadata.json
+        item_generator: Generator yielding items to serialize.
+        path: Output file path.
+    """
+    with open(path, 'w', encoding='utf-8') as f:
+        for item in item_generator:
+            f.write(json.dumps(item, ensure_ascii=False) + '\n')
+    print(f"[INFO] Saved: {path}")
+
+
+def load_jsonl(path: Path) -> Generator[Any, None, None]:
+    """
+    Yield items from a JSONL file.
+    
+    Args:
+        path: Input file path.
+        
+    Yields:
+        Deserialized items.
+    """
+    with open(path, 'r', encoding='utf-8') as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                yield json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+
+def save_json_stream(
+    item_generator, 
+    path: Path, 
+    root_path: str, 
+    generated_at: str
+) -> None:
+    """
+    Save metadata to a JSONL file.
+    First line is the header (root, generated_at).
+    Subsequent lines are file records.
+    
+    Args:
+        item_generator: Generator yielding dicts (files).
+        path: Output file path.
+        root_path: Value for 'root' key.
+        generated_at: Value for 'generated_at' key.
+    """
+    with open(path, 'w', encoding='utf-8') as f:
+        # Write header as first line
+        header = {
+            "root": root_path,
+            "generated_at": generated_at,
+            "type": "metadata_header"
+        }
+        f.write(json.dumps(header, ensure_ascii=False) + '\n')
+        
+        # Write items
+        for item in item_generator:
+            f.write(json.dumps(item, ensure_ascii=False) + '\n')
+            
+    print(f"[INFO] Saved: {path}")
+
+
+def load_metadata_files_stream(path: Path):
+    """
+    Yield file dicts from a metadata.jsonl file.
+    Skips the header line.
+    
+    Args:
+        path: Path to metadata.jsonl
         
     Yields:
         File metadata dicts.
     """
     with open(path, 'r', encoding='utf-8') as f:
+        first = True
         for line in f:
             line = line.strip()
-            
-            # Skip empty lines
             if not line:
                 continue
-                
-            # Skip header lines
-            if line == '{':
-                continue
-            if line.startswith('"root":') or line.startswith('"generated_at":'):
-                continue
-            if line.startswith('"files": ['):
-                continue
-                
-            # Skip footer lines
-            if line == ']' or line == '}':
-                continue
-            if line == '],': 
-                continue
-                
-            # Remove trailing comma if present
-            if line.endswith(','):
-                line = line[:-1]
-                
+            
             try:
                 data = json.loads(line)
-                # Ensure it's a file dict (has rel_path)
-                if isinstance(data, dict) and "rel_path" in data:
+                
+                # Skip header
+                if first:
+                    first = False
+                    if data.get("type") == "metadata_header" or "root" in data:
+                        continue
+                
+                # Legacy support: if it looks like a file, yield it
+                if "rel_path" in data:
                     yield data
+                    
             except json.JSONDecodeError:
                 continue
 
