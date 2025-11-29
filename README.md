@@ -6,35 +6,73 @@ Now features **Event-Based Organization** to automatically group photos and vide
 
 ## Features
 
-- **Event-Based Organization**: Automatically detects clusters of files by name or date and groups them into event folders.
-- **Rule-Based Planning**: Scalable mode for large directories where the LLM designs rules instead of moving every file individually.
-- **Smart Analysis**: Uses AI to understand file types, dates, and naming patterns.
-- **Safe by Default**: 
-  - **Dry-run** mode lets you preview all changes.
-  - **Collision Detection** automatically renames duplicates (e.g., `file_1.txt`) to prevent data loss.
-  - **Drive Safety** checks ensure external drives are connected before operations.
-- **Full Transparency**: Generates JSON reports for metadata, plan, and execution.
-- **Resumable**: Can skip the LLM call and reuse an existing plan.
+## Key Features
+
+- **AI-Powered Organization**: Uses LLMs (via Gemini) to understand your file structure and create personalized organization rules.
+- **Large Drive Support (Streaming)**: Optimized for huge datasets (e.g., 2TB+, 1M+ files). Uses streaming (JSONL) to keep memory usage low and constant.
+- **Safety First**:
+    - **Dry Run**: Always previews changes before applying them.
+    - **Undo Capability**: Automatically generates an undo plan for every operation.
+    - **Collision Handling**: Smartly handles duplicate filenames without overwriting.
+    - **Cross-Device Protection**: Prevents accidental moves across different drives.
+- **Smart Metadata**: Extracts EXIF dates from photos to organize by "Date Taken".
+- **Robust Execution**: Parallel processing for fast execution, with automatic path normalization for cross-platform compatibility.
 
 ## Installation
 
+1.  **Clone the repository**:
+    ```bash
+    git clone https://github.com/yourusername/drive-reorganization-tool.git
+    cd drive-reorganization-tool
+    ```
+
+2.  **Install dependencies**:
+    ```bash
+    pip install -r requirements.txt
+    ```
+
+3.  **Set up API Key**:
+    Export your Gemini API key:
+    ```bash
+    export GEMINI_API_KEY="your_api_key_here"
+    ```
+
+## Usage
+
+### 1. Scan Your Drive
+Scan the drive to build a metadata index. This is fast and memory-efficient.
+
 ```bash
-# Clone or download this repository
-cd folder-restructure
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Set your Gemini API key (copy .env.example to .env)
-cp .env.example .env
-# Then edit .env and add your key:
-# GEMINI_API_KEY=your-api-key-here
+python -m reorganize_hdd scan /path/to/your/drive -o metadata.jsonl
 ```
 
-### Getting a Gemini API Key
+### 2. Plan Organization
+Generate a reorganization plan based on the scan.
 
-1. Go to [Google AI Studio](https://aistudio.google.com/)
-2. Sign in with your Google account
+**Automatic Mode (AI)**:
+Let the AI analyze your files and suggest a plan.
+```bash
+python -m reorganize_hdd plan metadata.jsonl --goal "Organize photos by year and documents by type" -o plan.jsonl
+```
+
+**Rules Mode (Manual)**:
+Apply predefined rules for specific file types.
+```bash
+python -m reorganize_hdd plan metadata.jsonl --mode rules -o plan.jsonl
+```
+
+### 3. Apply Changes
+Execute the plan. This will move files and clean up empty directories.
+
+```bash
+python -m reorganize_hdd apply plan.jsonl --root /path/to/your/drive
+```
+
+**Undo**:
+If you made a mistake, simply apply the generated undo plan:
+```bash
+python -m reorganize_hdd apply undo_plan_YYYYMMDD_HHMMSS.jsonl --root /path/to/your/drive
+```
 3. Click "Get API Key" → "Create API Key"
 4. Copy the key and set it as an environment variable
 
